@@ -8,8 +8,10 @@ from context import CTX, PT
 class Object:
 
     def __init__(self, c, data):
+
         self.class_name = c
         self.bin_data = data
+
         self.class_ref = None
         self.occurrences = dict()
 
@@ -79,10 +81,13 @@ class Object:
                             # ctx = CTX(xref.frm, PT(idc.GetOpnd(xref.frm, 0), xref.frm))
                             self.add_occurrences(xref.frm)
 
-    # The X0 register of instance methods is always the self.class_name type object
     def as_x0(self):
-        if idc.SegName(idc.Qword(self.class_ref)) == 'UNDEF':
-            return  # IMPORTED CLASS
+        """
+        The receiver(X0) of instance methods is always the object.
+        :return:
+        """
+        if idc.SegName(idc.Qword(self.class_ref)) == 'UNDEF':  # IMPORTED CLASS, has no method implementations.
+            return
         class_data = idc.Qword(self.class_ref)
         class_data_ro = idc.Qword(class_data + 0x20)
         meths = idc.Qword(class_data_ro + 0x20)
