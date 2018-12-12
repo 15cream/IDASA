@@ -4,14 +4,20 @@ import idaapi
 import idautils
 
 
+pat1 = re.compile(r'^\[(?P<register>\w*),(?P<offset>[^,]*)\]')  # '[SP,#0x80+var_80]'
+pat2 = re.compile(r'^\[(?P<register>[^,]*)\],(?P<offset>[^,]*)')  # '[SP+0xC0+var_C0],#0x60'
+pat3 = re.compile(r'^\[(?P<register>\w*)\]')  # '[X8]'
+patterns = [pat1, pat2, pat3]
+
+
 def find_type_of_meth(imp):
     for xref in idautils.XrefsTo(imp):
         if idc.SegName(xref.frm) == '__objc_const':
             if idc.Qword(xref.frm + 16) == imp:
                 type = idc.GetDisasm(idc.Qword(xref.frm + 8))
-                m = re.search('DCB (?P<type>.+),0', type)
+                m = re.search('DCB (?P<def_type>.+),0', type)
                 if m:
-                    return m.group('type')
+                    return m.group('def_type')
 
 
 def find_return_type(imp):
@@ -57,6 +63,35 @@ def slice_analysis_needed(ea):
     instructions = (f.endEA - f.startEA) / 4
     return blocks, instructions
 
+
+def ret_operand(ea, index):
+    opType = idc.GetOpType(ea, index)
+    if opType == 0:  # o_void
+        return "void"
+    elif opType == 1:  # o_reg
+        return idc.GetOpnd(ea, index)
+    elif opType == 2:  # o_mem
+        return idc.GetOperandValue(ea, index)
+    elif opType == 3:  # o_phrase [X20,X8]
+        return idc.GetOpnd(ea, index).strip('[]').split(',')
+    elif opType == 4:  # o_displ [SP,#0x80+var_80]; [SP+0xC0+var_C0],#0x60;[X8]
+        op = idc.GetOpnd(ea, index)
+        ops = []
+        for pat in patterns:
+            m = pat.match(op)
+            if m:
+                ops.append(m.groupdict()['register'])
+                if 'offset' in m.groupdict():
+                    ops.append(idc.GetOperandValue(ea, index))
+        return ops
+    elif opType == 5:  # o_imm
+        return idc.GetOperandValue(ea, index)
+    elif opType == 6:  # o_far
+        return idc.GetOperandValue(ea, index)
+    elif opType == 7:  # o_near
+        return idc.GetOperandValue(ea, index)
+    else:
+        return idc.GetOpnd(ea, index)
 
 # funcs = Functions()
 # for f in funcs:

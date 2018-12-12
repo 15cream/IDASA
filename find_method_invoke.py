@@ -1,7 +1,7 @@
 import idc
 import idaapi
 import idautils
-from object import Object
+from oc_object import Object
 
 
 class MethodInvoke:
@@ -41,9 +41,9 @@ class MethodInvoke:
             if idc.SegName(xref.frm) == '__text':
                 fi = idaapi.get_func(xref.frm).startEA
                 if fi not in self.selector_ctx:
-                    self.selector_ctx[fi] = [xref.frm, ]
+                    self.selector_ctx[fi] = set([xref.frm, ])
                 else:
-                    self.selector_ctx[fi].append(xref.frm)
+                    self.selector_ctx[fi].add(xref.frm)
             else:
                 print 'XREF OF {} NOT IN TEXT SEGMENT: {}'.format(self.selector_str, hex(xref.frm))
 
@@ -57,7 +57,7 @@ class MethodInvoke:
         receiver = Object(self.receiver_str, self.bin_data)
         if receiver:
             receiver.find_occurrences()
-            self.receiver_ctx = receiver.occurrences
+            self.receiver_ctx = receiver.get_union_occurs()
 
     def print_results(self):
         if self.selector_str:

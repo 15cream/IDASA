@@ -4,64 +4,45 @@ import idc
 import copy
 import re
 
-pat1 = re.compile(r'^\[(?P<register>\w*),(?P<offset>[^,]*)\]')  # '[SP,#0x80+var_80]'
-pat2 = re.compile(r'^\[(?P<register>[^,]*)\],(?P<offset>[^,]*)')  # '[SP+0xC0+var_C0],#0x60'
-pat3 = re.compile(r'^\[(?P<register>\w*)\]')  # '[X8]'
-patterns = [pat1, pat2, pat3]
-
-class CTX:
-
-    def __init__(self, ea, p):
-        self.start = ea
-        self.function = idaapi.get_func(ea).startEA
-        self.end = idaapi.get_func(ea).endEA
-        self.p = p
-
-    def slice_analysis(self):
-        pass
-
-    def find_call(self, rec=None, sel=None):
-        return False
-
-    # if find_return_type(idaapi.get_func(ea).startEA) == "@":
-    #     self.check_obj_as_ret(type, ea)
+from Utils import *
 
 
 class PT:
     def __init__(self, ea, name):
         self.name = name
         self.ea = ea
-        self.active_paths = [Path(ea, self)]
-        self.dead_paths = []
-        self.conf_paths = []
         self.ctx_start = idaapi.get_func(ea).startEA
         self.ctx_end = idaapi.get_func(ea).endEA
 
-    #  start at p.ea, end at all pointers were killed.
+        self.active_paths = [Path(ea, self)]
+        self.dead_paths = []
+        self.conf_paths = []
+
     def forward_analysis(self):
+        """
+        Start at self.ea, end at all pointers were killed.
+        :return:
+        """
         self.active_paths = [Path(self.ea, self)]
         while self.active_paths:
             add = []
             remove = []
             for p in self.active_paths:
-                ea = p.route[-1]
-                while ea != self.ctx_end:  # context end,
+                ea = p.route[-1]  # the latest step
+                while ea != self.ctx_end:
                     ea = idc.NextHead(ea)
                     if idc.GetMnem(ea) in ['CBZ', 'B']:
                         for des in idautils.CodeRefsFrom(ea, 1):
                             if des in p.route:  # avoid loop
                                 continue
                             successor_path = copy.deepcopy(p)
-                            # successor_path.route.append(ea)
-                            # successor_path.route.extend([ea, des])
-                            # add.append(successor_path)
                             successor_path.route.append(ea)
                             successor_path.add_step(des)
                             if successor_path.active:
                                 add.append(successor_path)
                             else:
                                 self.dead_paths.append(successor_path)
-                        remove.append(p)
+                        remove.append(p)  # the path is not dead, just gave path to the successors.
                         break
                     else:
                         p.add_step(ea)
@@ -76,13 +57,17 @@ class PT:
             for p in remove:
                 self.active_paths.remove(p)
 
-    # start at p.ea, end at all vars were defined.
-    def backward_analysis(self):
+    #
+    def backward_analysis(self, ):
+        """
+        Start at self.ea, end at all vars were defined.
+        :return:
+        """
         vars = set()
-        for p in self.dead_paths:
-            for i in p.invokes:
-                vars.add(p.invokes[i]['receiver'])
-                vars.add(p.invokes[i]['selector'])
+        # for p in self.dead_paths:
+        #     for i in p.invokes:
+        #         vars.add(p.invokes[i]['receiver'])
+        #         vars.add(p.invokes[i]['selector'])
         vars.remove('DEF')
         self.active_paths = [BPath(self.ea, self, list(vars))]
         while self.active_paths:
@@ -122,34 +107,69 @@ class PT:
 
 
 class Path:
+
     def __init__(self, start, pt):
         self.pt = pt
-        self.active = True
         self.route = [start, ]
         self.defs = []
         self.alias = [pt.name]
         self.invokes = dict()
+        self.active = True
         self.ret = False
 
     def add_step(self, ea):
         ins = idc.GetDisasm(ea)
-        # When paths meets megSend call, the watched object could pass as a parameter.
-        # Then we should backtrack the receiver and selector of this call,
-        # to resolve which function we should dig into.
+
         if '_objc_msgSend' in ins:
+            """
+            When path meets megSend call, the watched object could pass as a parameter.
+            So we should backtrack the receiver and selector of this call to resolve which function we should dig into.
+            """
             self.invokes[ea] = {}
-        # When path meets ret instruction and is still alive, the watched object would ret.
-        # Then we should find the code slice calls this method and get the ret object.
-        elif 'RET' in ins:
+
+        elif 'RET' in ins and 'X0' in self.alias:
+            """
+            When path meets ret instruction and is still alive, the watched object would ret.
+            Then we should find the code slice calls this method and get the ret object.
+            """
             self.ret = True
+
         else:
+            # Definition analysis
             for a in self.alias:
                 if a in ins:
                     df = DEF(ea, a, self)
-                    if df.analysis():
+                    if df.def_type:
                         self.defs.append(df)
                         break
         self.route.append(ea)
+
+    def resolve_msgSend(self):
+        for i in self.invokes:
+            self.invokes[i] = {
+                'receiver': self.backtrack(i, 'X0'),
+                'selector': self.backtrack(i, 'X1')
+            }
+
+    def backtrack(self, ea, reg):
+        """
+        Path sensitive.
+        We've recorded path route, so just step backward until the entry.
+        If the value still cannot be determined, find route.
+        :param ea:
+        :param reg:
+        :return:
+        """
+        step = self.route.index(ea)
+        while step:
+            ea = self.route[step]
+            ins = idc.GetDisasm(ea)
+            if reg in ins:
+                df = DEF(ea, reg, self)
+                if df.def_type == 'DEL':
+                    reg = df.src  # change the watched object
+            step -= 1
+        return reg
 
     def kill(self):
         self.active = False
@@ -176,34 +196,6 @@ class Path:
         print '4. PROPAGATE AS PARAMETER: {}'.format(True if self.invokes else False)
         for i in self.invokes:
             print hex(i)
-
-    def resolve_msgSend(self):
-        for i in self.invokes:
-            self.invokes[i] = {
-                'receiver': self.backtrack(i, 'X0'),
-                'selector': self.backtrack(i, 'X1')
-            }
-
-    # Path sensitive
-    # We've recorded path route, so just step backward until the entry.
-    # If the value still cannot be determined, find route.
-    def backtrack(self, ea, reg):
-        step = self.route.index(ea)
-        while step:
-            ea = self.route[step]
-            ins = idc.GetDisasm(ea)
-            if reg in ins:
-                df = DEF(ea, reg, self)
-                df.trace()
-                if df.type == 'DEL':
-                    if df.src_type == 1:
-                        reg = df.src  # change the watched object
-                    else:
-                        reg = 'DEF'
-                        # print 'break at {}'.format(hex(self.route[step]))
-                        break  # terminate, found the src or cannot be resolved
-            step -= 1
-        return reg
 
 
 class BPath(Path):
@@ -234,7 +226,7 @@ class BPath(Path):
                 if a in ins:
                     df = DEF(ea, a, self)
                     df.trace()
-                    if df.type == 'DEL':
+                    if df.def_type == 'DEL':
                         if df.src_type == 1:
                             self.watched[unknown[a]]['alias'] = df.src  # change the watched object
                         else:
@@ -262,93 +254,52 @@ class DEF:
         self.var = var
         self.path = path
         self.src = None
-        self.src_type = None
         self.des = None
-        self.type = None
+        self.def_type = None
+        self.analysis()
 
     def analysis(self):
         if idc.GetMnem(self.ea) in ['LDR', 'MOV', 'ADRP']:  # op, des, src
-            if self.var in self.related_ops(0):  # des
+            if self.var in self.operand_at(0):  # des
                 self.path.remove_alias(self.var)
-                self.src = self.resolve_src()
+                self.src = self.operand_at(1, ret_expr=True)
                 self.des = self.var
-                self.type = 'DEL'
-                return True
-            elif self.var in self.related_ops(1):  # src
-                self.des = self.resolve_des()
+                self.def_type = 'DEL'
+
+            elif self.var in self.operand_at(1):  # src
+                self.des = self.operand_at(0, ret_expr=True)
                 self.path.add_alias(self.des)
                 self.src = self.var
-                self.type = 'ADD'
-                return True
-            else:
-                return False
+                self.def_type = 'ADD'
 
+            else:
+                self.def_type = False
+
+    # deprecated
     def trace(self):
         if idc.GetMnem(self.ea) in ['LDR', 'MOV', 'ADRP']:  # op, des, src
-            if self.var in self.related_ops(0):  # des
-                self.src = self.resolve_src()
-                self.type = 'DEL'
+            if self.var in self.operand_at(0):  # des
+                self.src = self.operand_at(1, ret_expr=True)
+                self.def_type = 'DEL'
 
-    def related_ops(self, index):
+    def operand_at(self, index, ret_expr=False):
+        if ret_expr:
+            return idc.GetOpnd(self.ea, index)
         ret = []
-        des = self.ret_operand(self.ea, index)
-        if type(des) == list:
-            ret.extend(des)
+        operand = ret_operand(self.ea, index)
+        if type(operand) == list:
+            ret.extend(operand)
         else:
-            ret.append(des)
+            ret.append(operand)
         return ret
-
-    def resolve_src(self):
-        self.src_type = idc.GetOpType(self.ea, 1)
-        return idc.GetOpnd(self.ea, 1)
-
-    def resolve_des(self):
-        # des = self.ret_operand(self.ea, 0)
-        # if type(des) == list:
-        #     for opreand in des:
-        #         if self.var == opreand:
-        #             return True
-        # else:
-        #     if des == self.var:
-        #         return True
-        # return False
-        return idc.GetOpnd(self.ea, 0)
 
     def pprint(self):
         print hex(self.ea), idc.GetDisasm(self.ea)
-        print "{} -> {}, {}".format(self.src, self.des, self.type)
+        print "{} -> {}, {}".format(self.src, self.des, self.def_type)
 
-    def ret_operand(self, ea, index):
-        opType = idc.GetOpType(ea, index)
-        if opType == 0:  # o_void
-            return "void"
-        elif opType == 1:  # o_reg
-            return idc.GetOpnd(ea, index)
-        elif opType == 2:  # o_mem
-            return idc.GetOperandValue(ea, index)
-        elif opType == 3:  # o_phrase [X20,X8]
-            return idc.GetOpnd(ea, index).strip('[]').split(',')
-        elif opType == 4:  # o_displ [SP,#0x80+var_80]; [SP+0xC0+var_C0],#0x60;[X8]
-            op = idc.GetOpnd(ea, index)
-            ops = []
-            for pat in patterns:
-                m = pat.match(op)
-                if m:
-                    ops.append(m.groupdict()['register'])
-                    if 'offset' in m.groupdict():
-                        ops.append(idc.GetOperandValue(ea, index))
-            return ops
-        elif opType == 5:  # o_imm
-            return idc.GetOperandValue(ea, index)
-        elif opType == 6:  # o_far
-            return idc.GetOperandValue(ea, index)
-        elif opType == 7:  # o_near
-            return idc.GetOperandValue(ea, index)
-        else:
-            return idc.GetOpnd(ea, index)
 
-# pt = PT(0x10060042c, 'X8')
-# pt.forward_analysis()
+pt = PT(0x10060042c, 'X8')
+pt.forward_analysis()
 # for p in pt.dead_paths:
 #     p.resolve_msgSend()
 # pt.backward_analysis()

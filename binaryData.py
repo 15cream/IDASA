@@ -18,7 +18,7 @@ class Binary:
         self._classrefs = dict()  # name: classref_ea
         self._classlist = dict()  # name: classlist_ea
         self._selrefs = dict()
-        self._ivars = dict()  # ivar_ea: type
+        self._ivars = dict()  # ivar_ea: def_type
         self._ivars_2 = dict()  # type:  ivar_ea list
         self._allocs = []
         self._imports = dict()  # symbol_name: ea
